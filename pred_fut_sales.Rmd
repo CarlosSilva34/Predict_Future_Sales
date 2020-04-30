@@ -1,36 +1,89 @@
-library(tidyverse)
-library(lubridate)
-library(scales)
-library(caret)
-library("Matrix")
-library(xgboost)
-library(foreach)
-library(doParallel)
+---
+title: "Predict Future Sales"
+author: "Carlos Silva"
+date: "`r format(Sys.Date())`"
+output: 
+   html_document:
+     toc: true
+     number_section: true
+     theme: readable
+     highlight: tango
+---
 
-setwd("C:/Users/Utilizador/Desktop/kaggle/Predict_Future_Sales")
-set.seed(2020)
+# Introduction
 
+## Description
 
-# Load data 
+In this competition i will work with a challenging time-series dataset consisting of daily sales data, kindly provided by one of the largest Russian software firms - 1C Company.  
+
+## Objective
+
+Provided with daily historical sales data. The task is to forecast the total amount of products sold in every shop for the test set. Note that the list of shops and products slightly changes every month. Creating a robust model that can handle such situations is part of the challenge.
+
+## Data fields
+
+ID - an Id that represents a (Shop, Item) tuple within the test set
+shop_id - unique identifier of a shop
+item_id - unique identifier of a product
+item_category_id - unique identifier of item category
+item_cnt_day - number of products sold. You are predicting a monthly amount of this measure
+item_price - current price of an item
+date - date in format dd/mm/yyyy
+date_block_num - a consecutive month number, used for convenience. January 2013 is 0, February 2013 is 1,..., October 2015 is 33
+item_name - name of item
+shop_name - name of shop
+item_category_name - name of item category
+
+# Set up
+
+## Load Packages
+
+```{r setup, include=T, message = F, warning=F}
+require(tidyverse)
+require(skimr)
+require(caret)
+require(xgboost)
+require(lubridate)
+require(Matrix)
+require(scales)
+require(foreach)
+require(doParallel)
+```
+
+## Load datasets
+
+```{r, message = F, warning=F}
 sales_Data <- read.csv('sales_train.csv')
 testData <- read.csv('test.csv')
 itemsData <- read.csv('items.csv')
 shopsData <- read.csv('shops.csv')
 itemsCatData <- read.csv('item_categories.csv')
 
-# merge data
+```
+
+# Merge datasets
+
+```{r,message= F, warning= F}
 salesData <- testData %>%
-  mutate(dbn_id = 1) %>%
-  left_join(data.frame(dbn_id = 1,
-                       date_block_num = seq(0, 34, by = 1)), by = "dbn_id") %>%
-  left_join(sales_Data, by = c("shop_id", "item_id", "date_block_num")) %>%
-  arrange(shop_id, item_id, date) %>%
-  left_join(itemsData, by = "item_id")
+        mutate(dbn_id = 1) %>%
+        left_join(data.frame(dbn_id = 1,
+                                    date_block_num = seq(0, 34, by = 1)), by = "dbn_id") %>%
+        left_join(sales_Data, by = c("shop_id", "item_id", "date_block_num")) %>%
+        arrange(shop_id, item_id, date) %>%
+        left_join(itemsData, by = "item_id")
 rm(sales_Data)
+```
+
+# Overview of the Data
+
+```{r}
+skim(salesData)
+```
 
 
 # Data Preparation
 
+```{r}
 salesData$date <- as.Date(salesData$date, "%d.%m.%Y")
 
 salesData <- salesData %>% 
@@ -56,7 +109,7 @@ salesData <- salesData %>%
         mutate(item_category_id = as.factor(item_category_id))
 
 salesData <- salesData %>%
-  mutate( revenue = ifelse((item_cnt_day < 0)|(item_price < 0), 0, item_price*item_cnt_day))
+        mutate( revenue = ifelse((item_cnt_day < 0)|(item_price < 0), 0, item_price*item_cnt_day))
 
 itemsData <- itemsData %>% 
         mutate(item_id = as.factor(item_id))
@@ -75,27 +128,32 @@ testData <- testData %>%
 
 testData <- testData %>% 
   mutate(item_id = as.factor(item_id))
+```
 
-# replace negative value and NA
+## Replace negative value and NA
+
+```{r}
 salesData <- salesData %>%
         mutate( item_cnt_day = ifelse(item_cnt_day < 0, 0, item_cnt_day),
-                
                 item_price = ifelse(is.na(item_price), 0, item_price))
+```
 
 # Remove Outliers
-#Any observation with item_cnt_day larger than 1000 gets removed.
-# Any observation with item_price larger than 50000 gets removed.
+Any observation with item_cnt_day larger than 1000 gets removed.
+Any observation with item_price larger than 50000 gets removed.
 
+```{r}
 item_cnt_day_outlier = 1000   
 item_price_outlier = 50000
 
 salesData <- salesData[salesData$item_cnt_day < item_cnt_day_outlier,]
 salesData <- salesData[salesData$item_price < item_price_outlier,]
+```
 
-# EDA
+# Exploring the Data
 
-# Sales by shop
-
+## Sales by shop
+```{r, warning=F}
 sales_by_shop = salesData %>%
         select(shop_id, item_cnt_day) %>%
         group_by(shop_id) %>%
@@ -108,11 +166,11 @@ ggplot(data =  na.omit(sales_by_shop),
         geom_histogram(stat = "identity", color = "orange") +
         scale_y_continuous(breaks= seq(0, 160000, by=20000), labels = comma) +
         xlab("Shop ID") + ylab("Sales Count")+
-        ggtitle(label = "Sales by Shop") 
+        ggtitle(label = "Sales by Shop")
+```
 
-
-# Sales by item category
-
+## Sales by item category
+```{r, warning=F}
 sales_by_category = salesData %>%
         select(item_category_id, item_cnt_day) %>%
         group_by(item_category_id) %>%
@@ -126,10 +184,10 @@ ggplot(data =  na.omit(sales_by_category),
         scale_y_continuous(breaks= seq(0, 220000, by=20000), labels = comma) +
         xlab("Item Category") + ylab("Sales Count") +
         ggtitle("Sales by Item Category")
-        
+```
 
-# Items by shop
-
+## Items sold by shop
+```{r, warning=F}
 items_by_shop = salesData %>%
         select(shop_id, item_id) %>%
         group_by(shop_id) %>%
@@ -142,11 +200,11 @@ ggplot(data = na.omit(items_by_shop),
         geom_histogram(stat = "identity", color = "orange") +
         scale_y_continuous(breaks= seq(0, 4000, by=500), labels = comma) +
         xlab(" Shop ID")+ ylab("Items ID")+
-        ggtitle(" Items sales by Shop") 
-        
+        ggtitle(" Items sales by Shop")
+```
 
-# Tne most available items by category
-
+## Tne most available items by category
+```{r, warning=F}
 items_by_category = salesData %>%
         select(item_category_id, item_id) %>%
         group_by(item_category_id) %>%
@@ -160,10 +218,10 @@ ggplot(data = na.omit(items_by_category),
         xlab(" Category ID")+ ylab(" Items in Category") +
         scale_y_continuous(breaks= seq(0, 1000, by=100), labels = comma) +
         ggtitle("Most Items by Category") 
+```
 
-
-# The most sold item in the each shop 
-
+## The most sold item in the each shop 
+```{r, warning=F}
 most_sold_items_in_shop  =  salesData %>%
         group_by(shop_id, item_id) %>%
         summarise(most_sold_item = sum(item_cnt_day)) %>%
@@ -178,10 +236,10 @@ ggplot(data = na.omit(most_sold_items_in_shop),
         scale_y_continuous(breaks= seq(0, 1000, by=100), labels = comma) +
         xlab("Shop ID") + ylab("Sales Count") +
         ggtitle("Most Sold Items in each Shop ") 
-        
-        
-# Item category is highest sales grossing in all shops
+```
 
+## Item category is highest sales grossing in all shops
+```{r, warning=F}
 sales_grossing_category = salesData %>%
         group_by(item_category_id) %>%
         summarise(gross_category = sum(revenue)) %>%
@@ -195,10 +253,10 @@ ggplot(data = na.omit(sales_grossing_category),
         scale_y_continuous(breaks= seq(0, 415000000, by=50000000), labels = comma) +
         xlab("Category ID") + ylab("Gross Category")+
         ggtitle("Sales Grossing by Item category") 
-        
+```
 
-# The most sold item in eack category
-
+## The most sold item in eack category
+```{r, warning=F}
 most_sold_item_per_category = salesData %>%
         group_by(item_category_id, item_id) %>%
         summarise(totalSales = sum(revenue)) %>%
@@ -212,10 +270,10 @@ ggplot(data = na.omit(most_sold_item_per_category),
         geom_histogram(stat = "identity", color = "orange") +
         scale_y_continuous(breaks= seq(0, 200000000, by=20000000), labels = comma) +
         labs(title = "Items sold per category",x = "Category ID", y = "Sales", fill = "Item ID") 
+```
 
-
-# Day and month vs total sales 
-
+## Day and month vs total sales 
+```{r, warning=F}
 month_day_total_sales =  salesData %>%
         group_by(month, day) %>%
         summarise(totalSales =  sum(revenue))
@@ -229,8 +287,9 @@ ggplot(data = na.omit(month_day_total_sales),
         geom_point() +
         scale_y_continuous(breaks= seq(0, 34000000, by=4000000), labels = comma) +
         labs(title = "Total Sales month-day", x = "Days", y = "Total sales", fill = "Months")
+```
 
-
+```{r, warning=F}
 ggplot(data = na.omit(month_day_total_sales), 
        aes(x = day, 
            y = totalSales, 
@@ -239,10 +298,10 @@ ggplot(data = na.omit(month_day_total_sales),
         scale_y_continuous(breaks= seq(0, 30000000, by=9000000), labels = comma) +
         labs(title = "Total Sales month-day", x = "Days", y = "Total sales", fill = "Days") +
         facet_wrap(~month, ncol = 2)
+```
 
-
-# total sales by year
-
+## Total sales by year
+```{r, warning=F}
 yearSales <- salesData %>%
         group_by(year) %>%
         summarise(yearSale = sum(revenue))
@@ -252,10 +311,10 @@ ggplot(data = na.omit(yearSales), aes(x =  year, y = yearSale, fill =  year))+
         scale_y_continuous(breaks= seq(0, 1400000000, by=200000000), labels = comma) +
         labs(title = "Sales by Year", x = "Year", y = "Total Sale", fill = "Year")+
         geom_label(stat = "identity",position = position_dodge(width = 1),hjust = "center", aes(label = yearSale)) 
+```
 
-
-# Total sales by year and month 
-
+## Total sales by year and month
+```{r, warning=F}
 ymSales = salesData %>%
         group_by(year, month) %>%
         summarise(ymSale = sum(revenue)) %>%
@@ -266,10 +325,10 @@ ggplot(na.omit(ymSales), aes(x =  month, y = ymSale, fill =  year))+
         geom_histogram(stat = "identity", position = "dodge", color = "blue") +
         scale_y_continuous(breaks= seq(0, 126000000, by=25000000), labels = comma) +
         labs(title = "Year / Month sales", x = "Month", y =  "Total sales", fill = "Year")
-        
+```
 
-# Number of items sold by day 
-
+## Number of items sold by day
+```{r, warning=F}
 dailySale = salesData %>%
         group_by(date) %>%
         summarise(itemSold =  sum(item_cnt_day))
@@ -278,11 +337,11 @@ ggplot(na.omit(dailySale), aes(x =  date, y = itemSold, color =  itemSold)) +
         geom_line() +
         geom_point()+
         scale_y_continuous(breaks= seq(0, 15000, by=1000), labels = comma) +
-        labs(title = "Item sold by day", x =  "Date", y = "Items sold")  
+        labs(title = "Item sold by day", x =  "Date", y = "Items sold")
+```
 
-
-# Number of items sold on weekdays 
-
+## Number of items sold on weekdays
+```{r, warning=F}
 weekdays_item_Sale = salesData %>%
         group_by(weekdays) %>%
         summarise(itemSold = sum(item_cnt_day)) %>%
@@ -292,11 +351,11 @@ ggplot(na.omit(weekdays_item_Sale), aes(x =reorder(weekdays, itemSold), y =  ite
         geom_bar(stat = "identity", color = "blue") +
         scale_y_continuous(breaks= seq(0, 750000, by=100000), labels = comma) +
         labs(title = "Items sold on weekdays", x = "Week Days", y =  "Items sold", fill = "Week Days") +
-        geom_label(stat = "identity",position = position_dodge(width = 1),hjust = "center", aes(label = itemSold)) 
+        geom_label(stat = "identity",position = position_dodge(width = 1),hjust = "center", aes(label = itemSold))  
+```
 
-
-# sales on weekdays
-
+## Sales on weekdays
+```{r, warning=F}
 weekdaysSales = salesData %>%
         group_by(weekdays) %>%
         summarise(totalSale = sum(revenue)) %>%
@@ -308,10 +367,12 @@ ggplot(na.omit(weekdaysSales), aes(x =reorder(weekdays, totalSale), y =  totalSa
         scale_y_continuous(breaks= seq(0, 650000000, by=50000000), labels = comma) +
         labs(title = "Sales on weekdays", x = "Week Days", y =  "Items sold", fill = "Week Days") +
         geom_label(stat = "identity",position = position_dodge(width = 1),hjust = "center", aes(label = totalSale)) 
- 
+```
 
- 
+
 # Feature engineering
+
+```{r, warning=F}
 new_df<- function(df, period){
   
   
@@ -524,15 +585,18 @@ new_df<- function(df, period){
   return(final)
   
 }
+```
 
+```{r, warning=F}
 salesData1 <- new_df(salesData, 32)
 salesData2 <- new_df(salesData, 33)
 salesData_pred <- new_df(salesData, 34)
-
+```
 
 
 # xgboost
 
+```{r, warning=F}
 model_xgboost <- function(X_data, Y_data){
   
   X_data <- X_data %>% as.matrix()
@@ -561,7 +625,7 @@ model_xgboost <- function(X_data, Y_data){
                   nthread = N_cpu
   )
   
-  # modling
+  # modeling
   set.seed(2020)
   model_xgb <- xgboost(param = param, data = X_data, label = Y_data,
                        nrounds = which.min(xgbcv$evaluation_log$test_rmse_mean),
@@ -569,9 +633,10 @@ model_xgboost <- function(X_data, Y_data){
   
   return(model_xgb)
 }
+```
 
 
-# preparation
+```{r, warning=F}
 x_salesData1 <- salesData1 %>%
   select(
     starts_with("item_price_"), -month1, starts_with("l_"), starts_with("total_sales_"),
@@ -584,7 +649,9 @@ x_salesData1 <- salesData1 %>%
 
 y_salesData1 <- salesData1 %>%
   select(total_sales_select)
+```
 
+```{r, warning=F}
 x_salesData2 <- salesData2 %>%
   select(
     starts_with("item_price_"), -month1, starts_with("l_"), starts_with("total_sales_"),
@@ -597,8 +664,12 @@ x_salesData2 <- salesData2 %>%
 
 y_salesData2 <- salesData2 %>%
   select(total_sales_select)
+```
 
-# check the most important features
+
+## Check the most important features
+
+```{r, warning=F}
 xgb1 <- model_xgboost(x_salesData1, y_salesData1)
 mat <- xgb.importance(names(x_salesData1), model = xgb1)
 ggplot(mat[1:25,])+
@@ -606,10 +677,11 @@ ggplot(mat[1:25,])+
   xlab(label = "Features")+
   coord_flip() +
   ggtitle("Feature Importance")
+```
 
+## RMSE of data
 
-
-# RMSE 1
+```{r, warning=F}
 pred_salesData1 <- salesData1 %>%
   bind_cols(pred = predict(xgb1, newdata = x_salesData1 %>% as.matrix(), type = "response")) %>%
   mutate(error = total_sales_select - pred)
@@ -618,8 +690,9 @@ pred_salesData1 %>%
   summarise(
     RMSE = sqrt(sum(abs(error^2))/n())
   )
+```
 
-# RMSE 2
+```{r, warning=F}
 pred_salesData2 <- salesData2 %>%
   bind_cols(pred = predict(xgb1, newdata = x_salesData2 %>% as.matrix(), type = "response")) %>%
   mutate(error = total_sales_select - pred)
@@ -628,7 +701,11 @@ pred_salesData2 %>%
   summarise(
     RMSE = sqrt(sum(abs(error^2))/n())
   )
+```
 
+## Final prediction 
+
+```{r, warning=F}
 x_salesData_pred <- salesData_pred %>%
   select(
     starts_with("item_price_"), -month1, starts_with("l_"), starts_with("total_sales_"),
@@ -638,7 +715,9 @@ x_salesData_pred <- salesData_pred %>%
     -item_price_shop_min, -item_price_shop_mean, -item_price_shop_median, -item_price_mean,
     -item_price_median, -item_price_max, -l_price1, -l_price2, -l_price3,-l_price4, -l_price5
   )
+```
 
+```{r, warning=F}
 finalPredictions <- salesData_pred %>%
   bind_cols(item_cnt_month = predict(xgb1, newdata = x_salesData_pred %>% as.matrix(), type = "response")) %>%
   left_join(testData, by = c("shop_id", "item_id")) %>%
@@ -648,3 +727,5 @@ finalPredictions <- salesData_pred %>%
 summary(finalPredictions)
 
 write.csv(finalPredictions, file="finalpredictions.csv", row.names = F)
+```
+
