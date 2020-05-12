@@ -4,314 +4,310 @@ library(scales)
 library(caret)
 library("Matrix")
 library(xgboost)
-library(foreach)
-library(doParallel)
+
 
 setwd("C:/Users/Utilizador/Desktop/kaggle/Predict_Future_Sales")
 set.seed(2020)
 
 
 # Load data 
+
 sales_Data <- read.csv('sales_train.csv')
 testData <- read.csv('test.csv')
 itemsData <- read.csv('items.csv')
 shopsData <- read.csv('shops.csv')
 itemsCatData <- read.csv('item_categories.csv')
 
+
+# Preparing the data
+
+sales_Data$date <- as.Date(sales_Data$date, "%d.%m.%Y")
+
+sales_Data <- sales_Data %>% 
+  mutate(month = month(date))
+
+sales_Data <- sales_Data %>% 
+  mutate(day = day(date))
+
+Sys.setlocale("LC_TIME", "C")
+sales_Data <- sales_Data %>% 
+  mutate(weekdays = weekdays(date))
+
+sales_Data <- sales_Data %>% 
+  mutate(shop_id = as.character(shop_id))
+
+sales_Data <- sales_Data %>% 
+  mutate(item_id = as.character(item_id))
+
+sales_Data <- sales_Data %>%
+  mutate( revenue = ifelse((item_cnt_day < 0)|(item_price < 0), 0, item_price*item_cnt_day))
+
+testData <- testData %>% 
+  mutate(ID = as.character(ID))
+
+testData <- testData %>% 
+  mutate(shop_id = as.character(shop_id))
+
+testData <- testData %>% 
+  mutate(item_id = as.character(item_id))
+
+itemsData <- itemsData %>% 
+  mutate(item_id = as.character(item_id))
+
+itemsData <- itemsData %>% 
+  mutate(item_category_id = as.character(item_category_id))
+
+itemsData <- itemsData %>% 
+  mutate(item_name = as.character(item_name))
+
+itemsCatData <- itemsCatData %>%
+  mutate(item_category_id = as.character(item_category_id))
+
+itemsCatData <- itemsCatData %>%
+  mutate(item_category_name = as.character(item_category_name))
+
+shopsData <- shopsData %>%
+  mutate(shop_id = as.character(shop_id))
+
+shopsData <- shopsData %>%
+  mutate(shop_name  = as.character(shop_name))
+
 # merge data
+
 salesData <- testData %>%
-  mutate(dbn_id = 1) %>%
-  left_join(data.frame(dbn_id = 1,
-                       date_block_num = seq(0, 34, by = 1)), by = "dbn_id") %>%
-  left_join(sales_Data, by = c("shop_id", "item_id", "date_block_num")) %>%
-  arrange(shop_id, item_id, date) %>%
-  left_join(itemsData, by = "item_id")
+    mutate(tmp_id = 1) %>%
+    left_join(data.frame(tmp_id = 1,
+                              date_block_num = seq(0, 34, by = 1)), by = "tmp_id") %>%
+    left_join(sales_Data, by = c("shop_id", "item_id", "date_block_num")) %>%
+    arrange(shop_id, item_id, date) %>%
+    left_join(shopsData, by = "shop_id") %>%
+    left_join(itemsData, by = "item_id")
+
 rm(sales_Data)
 
 
-# Data Preparation
-
-salesData$date <- as.Date(salesData$date, "%d.%m.%Y")
-
-salesData <- salesData %>% 
-        mutate(year = as.factor(year(date)))
-
-salesData <- salesData %>% 
-        mutate(month = as.factor(month(date)))
-
-salesData <- salesData %>% 
-        mutate(day = as.factor(day(date)))
-
-Sys.setlocale("LC_TIME", "C")
-salesData <- salesData %>% 
-        mutate(weekdays = as.factor(weekdays(date)))
-
-salesData <- salesData %>% 
-        mutate(item_id = as.factor(item_id))
-
-salesData <- salesData %>% 
-        mutate(shop_id = as.factor(shop_id))
-
-salesData <- salesData %>% 
-        mutate(item_category_id = as.factor(item_category_id))
-
-salesData <- salesData %>%
-  mutate( revenue = ifelse((item_cnt_day < 0)|(item_price < 0), 0, item_price*item_cnt_day))
-
-itemsData <- itemsData %>% 
-        mutate(item_id = as.factor(item_id))
-
-itemsData <- itemsData %>% 
-  mutate(item_category_id = as.factor(item_category_id))
-
-itemsCatData <- itemsCatData %>%
-        mutate(item_category_id = as.factor(item_category_id))
-
-shopsData <- shopsData %>%
-        mutate(shop_id = as.factor(shop_id))
-
-testData <- testData %>% 
-  mutate(shop_id = as.factor(shop_id))
-
-testData <- testData %>% 
-  mutate(item_id = as.factor(item_id))
-
 # replace negative value and NA
+
 salesData <- salesData %>%
         mutate( item_cnt_day = ifelse(item_cnt_day < 0, 0, item_cnt_day),
                 
                 item_price = ifelse(is.na(item_price), 0, item_price))
 
-# Remove Outliers
-#Any observation with item_cnt_day larger than 1000 gets removed.
-# Any observation with item_price larger than 50000 gets removed.
 
-item_cnt_day_outlier = 1000   
-item_price_outlier = 50000
+# Exploring the Data
 
-salesData <- salesData[salesData$item_cnt_day < item_cnt_day_outlier,]
-salesData <- salesData[salesData$item_price < item_price_outlier,]
+# Item sales by shop
 
-# EDA
+sales_by_shop <- salesData %>%
+  mutate(shop_id = as.factor(shop_id)) %>%
+  select(shop_id, item_cnt_day) %>%
+  group_by(shop_id) %>%
+  summarise(item_cnt_day =  sum(item_cnt_day, na.rm = TRUE))
 
-# Sales by shop
-
-sales_by_shop = salesData %>%
-        select(shop_id, item_cnt_day) %>%
-        group_by(shop_id) %>%
-        summarise(item_cnt_day =  sum(item_cnt_day))
-
-ggplot(data =  na.omit(sales_by_shop), 
+ggplot(data =  sales_by_shop, 
        mapping = aes(x = reorder(shop_id, item_cnt_day), 
                      y = item_cnt_day, 
                      fill = shop_id)) +
-        geom_histogram(stat = "identity", color = "orange") +
-        scale_y_continuous(breaks= seq(0, 160000, by=20000), labels = comma) +
-        xlab("Shop ID") + ylab("Sales Count")+
-        ggtitle(label = "Sales by Shop") 
+  geom_histogram(stat = "identity", color = "orange") +
+  scale_y_continuous(breaks= seq(0, 160000, by=20000), labels = comma) +
+  xlab("Shop ID") + ylab("Item Sales Count")+
+  ggtitle(label = "Item Sales by Shop") 
 
 
-# Sales by item category
+# Item sales by category
 
-sales_by_category = salesData %>%
-        select(item_category_id, item_cnt_day) %>%
-        group_by(item_category_id) %>%
-        summarise(item_cnt_day =  sum(item_cnt_day))
+item_sales_by_category <- salesData %>%
+  mutate(item_category_id = as.factor(item_category_id)) %>%
+  select(item_category_id, item_cnt_day) %>%
+  group_by(item_category_id) %>%
+  summarise(item_cnt_day =  sum(item_cnt_day, na.rm = TRUE))
 
-ggplot(data =  na.omit(sales_by_category), 
+ggplot(data =  item_sales_by_category, 
        mapping = aes(x = reorder(item_category_id,item_cnt_day), 
                      y = item_cnt_day,
                      fill = item_category_id)) +
-        geom_histogram(stat = "identity", color = "orange") +
-        scale_y_continuous(breaks= seq(0, 220000, by=20000), labels = comma) +
-        xlab("Item Category") + ylab("Sales Count") +
-        ggtitle("Sales by Item Category")
-        
-
-# Items by shop
-
-items_by_shop = salesData %>%
-        select(shop_id, item_id) %>%
-        group_by(shop_id) %>%
-        summarise(item_id = n_distinct(item_id))
-
-ggplot(data = na.omit(items_by_shop),
-       mapping = aes(x = reorder(shop_id,item_id),
-                     y = item_id,
-                     fill = shop_id))+
-        geom_histogram(stat = "identity", color = "orange") +
-        scale_y_continuous(breaks= seq(0, 4000, by=500), labels = comma) +
-        xlab(" Shop ID")+ ylab("Items ID")+
-        ggtitle(" Items sales by Shop") 
+  geom_histogram(stat = "identity", color = "orange") +
+  scale_y_continuous(breaks= seq(0, 220000, by=20000), labels = comma) +
+  xlab("Item Category") + ylab("Item Sales Count") +
+  ggtitle("Item sales by Category")
         
 
 # Tne most available items by category
 
-items_by_category = salesData %>%
-        select(item_category_id, item_id) %>%
-        group_by(item_category_id) %>%
-        summarise(item_id =  n_distinct(item_id))
+most_available_items_by_category <- salesData %>%
+  mutate(item_category_id = as.factor(item_category_id)) %>%
+  select(item_category_id, item_id) %>%
+  group_by(item_category_id) %>%
+  summarise(item_id =  n_distinct(item_id))
 
-ggplot(data = na.omit(items_by_category),
+ggplot(data = most_available_items_by_category,
        mapping = aes(x = reorder(item_category_id,item_id),
                      y = item_id,
                      fill = item_category_id)) +
-        geom_histogram(stat = "identity", color = "orange") +
-        xlab(" Category ID")+ ylab(" Items in Category") +
-        scale_y_continuous(breaks= seq(0, 1000, by=100), labels = comma) +
-        ggtitle("Most Items by Category") 
+  geom_histogram(stat = "identity", color = "orange") +
+  xlab(" Category ID")+ ylab(" Items Available") +
+  scale_y_continuous(breaks= seq(0, 1000, by=100), labels = comma) +
+  ggtitle("Tne Most Available Items by Category") 
 
 
 # The most sold item in the each shop 
 
-most_sold_items_in_shop  =  salesData %>%
-        group_by(shop_id, item_id) %>%
-        summarise(most_sold_item = sum(item_cnt_day)) %>%
-        filter(most_sold_item == max(most_sold_item)) %>%
-        arrange(desc(most_sold_item))
+most_sold_items_in_shop  <-  salesData %>%
+  mutate(item_id = as.factor(item_id)) %>%
+  group_by(shop_id, item_id) %>%
+  summarise(most_sold_item = sum(item_cnt_day, na.rm=TRUE)) %>%
+  filter(most_sold_item == max(most_sold_item)) %>%
+  arrange(desc(most_sold_item))
 
-ggplot(data = na.omit(most_sold_items_in_shop),
+ggplot(data = most_sold_items_in_shop,
        mapping = aes(x = reorder(shop_id, most_sold_item),
                      y = most_sold_item,
                      fill = item_id)) +
-        geom_histogram(stat = "identity", color = "orange") +
-        scale_y_continuous(breaks= seq(0, 1000, by=100), labels = comma) +
-        xlab("Shop ID") + ylab("Sales Count") +
-        ggtitle("Most Sold Items in each Shop ") 
+  geom_histogram(stat = "identity", color = "orange") +
+  scale_y_continuous(breaks= seq(0, 20000, by=4000), labels = comma) +
+  xlab("Shop ID") + ylab("Item Sales Count") +
+  ggtitle("The Most Sold Items in each Shop ") 
         
         
-# Item category is highest sales grossing in all shops
+# Total sales by item category
 
-sales_grossing_category = salesData %>%
-        group_by(item_category_id) %>%
-        summarise(gross_category = sum(revenue)) %>%
-        arrange(desc(gross_category))
+total_sales_by_category <- salesData %>%
+  mutate(item_category_id = as.factor(item_category_id)) %>%
+  group_by(item_category_id) %>%
+  summarise(sales_category = sum(revenue, na.rm = TRUE)) %>%
+  arrange(desc(sales_category))
 
-ggplot(data = na.omit(sales_grossing_category), 
-       aes(x = reorder(item_category_id, gross_category),
-           y = gross_category,
+ggplot(data = na.omit(total_sales_by_category), 
+       aes(x = reorder(item_category_id, sales_category),
+           y = sales_category,
            fill = item_category_id)) +
-        geom_histogram(stat = "identity", color = "orange") +
-        scale_y_continuous(breaks= seq(0, 415000000, by=50000000), labels = comma) +
-        xlab("Category ID") + ylab("Gross Category")+
-        ggtitle("Sales Grossing by Item category") 
+  geom_histogram(stat = "identity", color = "orange") +
+  scale_y_continuous(breaks= seq(0, 415000000, by=50000000), labels = comma) +
+  xlab("Category ID") + ylab("Sales Count")+
+  ggtitle("Total Sales by Item Category") 
         
 
 # The most sold item in eack category
 
-most_sold_item_per_category = salesData %>%
-        group_by(item_category_id, item_id) %>%
-        summarise(totalSales = sum(revenue)) %>%
-        filter(totalSales == max(totalSales)) %>%
-        arrange(desc(totalSales))
+most_sold_item_per_category <- salesData %>%
+  mutate(item_id = as.factor(item_id)) %>%
+  group_by(item_category_id, item_id) %>%
+  summarise(totalSales = sum(revenue, na.rm = TRUE)) %>%
+  filter(totalSales == max(totalSales)) %>%
+  arrange(desc(totalSales))
 
 ggplot(data = na.omit(most_sold_item_per_category),
        aes(x = reorder(item_category_id, totalSales), 
            y = totalSales,
            fill = item_id)) +
-        geom_histogram(stat = "identity", color = "orange") +
-        scale_y_continuous(breaks= seq(0, 200000000, by=20000000), labels = comma) +
-        labs(title = "Items sold per category",x = "Category ID", y = "Sales", fill = "Item ID") 
+  geom_histogram(stat = "identity", color = "orange") +
+  scale_y_continuous(breaks= seq(0, 200000000, by=20000000), labels = comma) +
+  labs(title = "The Most Sold Item in eack Category",x = "Category ID", y = "Sales Count", fill = "Item ID") 
 
 
 # Day and month vs total sales 
 
 month_day_total_sales =  salesData %>%
-        group_by(month, day) %>%
-        summarise(totalSales =  sum(revenue))
+  mutate(month = as.factor(month)) %>%
+  mutate(day = as.factor(day)) %>%
+  group_by(month, day) %>%
+  summarise(totalSales =  sum(revenue, na.rm = TRUE))
 
 ggplot(data = na.omit(month_day_total_sales), 
        aes(x = day, 
            y = totalSales, 
            group =  month, 
            color =  month)) +
-        geom_line() + 
-        geom_point() +
-        scale_y_continuous(breaks= seq(0, 34000000, by=4000000), labels = comma) +
-        labs(title = "Total Sales month-day", x = "Days", y = "Total sales", fill = "Months")
+  geom_line() + 
+  geom_point() +
+  scale_y_continuous(breaks= seq(0, 34000000, by=4000000), labels = comma) +
+  labs(title = "Total Sales by Day and Month", x = "Days", y = "Sales Count", fill = "Months")
 
 
 ggplot(data = na.omit(month_day_total_sales), 
        aes(x = day, 
            y = totalSales, 
            fill =  factor(day))) +
-        geom_histogram(stat = "identity", color = "blue") +
-        scale_y_continuous(breaks= seq(0, 30000000, by=9000000), labels = comma) +
-        labs(title = "Total Sales month-day", x = "Days", y = "Total sales", fill = "Days") +
-        facet_wrap(~month, ncol = 2)
+  geom_histogram(stat = "identity", color = "blue") +
+  scale_y_continuous(breaks= seq(0, 30000000, by=9000000), labels = comma) +
+  labs(title = "Total Sales by Day and Month", x = "Days", y = "Sales Count", fill = "Days") +
+  facet_wrap(~month, ncol = 2)
 
 
-# total sales by year
+# Total sales by year
 
 yearSales <- salesData %>%
-        group_by(year) %>%
-        summarise(yearSale = sum(revenue))
+  mutate(year = as.factor(year(date))) %>%
+  group_by(year) %>%
+  summarise(yearSale = sum(revenue, na.rm = TRUE))
 
 ggplot(data = na.omit(yearSales), aes(x =  year, y = yearSale, fill =  year))+
-        geom_histogram(stat = "identity", color = "blue")+
-        scale_y_continuous(breaks= seq(0, 1400000000, by=200000000), labels = comma) +
-        labs(title = "Sales by Year", x = "Year", y = "Total Sale", fill = "Year")+
-        geom_label(stat = "identity",position = position_dodge(width = 1),hjust = "center", aes(label = yearSale)) 
+  geom_histogram(stat = "identity", color = "blue")+
+  scale_y_continuous(breaks= seq(0, 700000000, by=100000000), labels = comma) +
+  labs(title = "Total Sales by Year", x = "Year", y = "Sales Count", fill = "Year")+
+  geom_label(stat = "identity",position = position_dodge(width = 1),hjust = "center", aes(label = yearSale)) 
 
 
 # Total sales by year and month 
 
 ymSales = salesData %>%
-        group_by(year, month) %>%
-        summarise(ymSale = sum(revenue)) %>%
-        arrange(year)
+  mutate(year = as.factor(year(date))) %>%
+  group_by(year, month) %>%
+  summarise(ymSale = sum(revenue, na.rm = TRUE)) %>%
+  arrange(year)
 ymSales$ymSale = round(ymSales$ymSale, 2)
 
 ggplot(na.omit(ymSales), aes(x =  month, y = ymSale, fill =  year))+
-        geom_histogram(stat = "identity", position = "dodge", color = "blue") +
-        scale_y_continuous(breaks= seq(0, 126000000, by=25000000), labels = comma) +
-        labs(title = "Year / Month sales", x = "Month", y =  "Total sales", fill = "Year")
+  geom_histogram(stat = "identity", position = "dodge", color = "blue") +
+  scale_x_continuous(breaks= seq(0, 12, by=1)) +
+  scale_y_continuous(breaks= seq(0, 126000000, by=25000000), labels = comma) +
+  labs(title = "Total Sales by Year and Month", x = "Month", y =  "Sales Count", fill = "Year")
         
 
 # Number of items sold by day 
 
 dailySale = salesData %>%
-        group_by(date) %>%
-        summarise(itemSold =  sum(item_cnt_day))
+  group_by(date) %>%
+  summarise(itemSold =  sum(item_cnt_day, na.rm = TRUE))
 
 ggplot(na.omit(dailySale), aes(x =  date, y = itemSold, color =  itemSold)) +
-        geom_line() +
-        geom_point()+
-        scale_y_continuous(breaks= seq(0, 15000, by=1000), labels = comma) +
-        labs(title = "Item sold by day", x =  "Date", y = "Items sold")  
+  geom_line() +
+  geom_point()+
+  scale_y_continuous(breaks= seq(0, 15000, by=1000), labels = comma) +
+  labs(title = "Items Sold by Day", x =  "Date", y = "Items Count")  
 
 
 # Number of items sold on weekdays 
 
 weekdays_item_Sale = salesData %>%
-        group_by(weekdays) %>%
-        summarise(itemSold = sum(item_cnt_day)) %>%
-        arrange(desc(itemSold))
+  group_by(weekdays) %>%
+  summarise(itemSold = sum(item_cnt_day, na.rm = TRUE)) %>%
+  arrange(desc(itemSold))
 
 ggplot(na.omit(weekdays_item_Sale), aes(x =reorder(weekdays, itemSold), y =  itemSold, fill = weekdays))+
-        geom_bar(stat = "identity", color = "blue") +
-        scale_y_continuous(breaks= seq(0, 750000, by=100000), labels = comma) +
-        labs(title = "Items sold on weekdays", x = "Week Days", y =  "Items sold", fill = "Week Days") +
-        geom_label(stat = "identity",position = position_dodge(width = 1),hjust = "center", aes(label = itemSold)) 
+  geom_bar(stat = "identity", color = "blue") +
+  scale_y_continuous(breaks= seq(0, 750000, by=100000), labels = comma) +
+  labs(title = "Items Sold on Weekdays", x = "Weekdays", y =  "Items count", fill = "Weekdays") +
+  geom_label(stat = "identity",position = position_dodge(width = 1),hjust = "center", aes(label = itemSold))
 
 
-# sales on weekdays
+# Total sales on weekdays
 
 weekdaysSales = salesData %>%
-        group_by(weekdays) %>%
-        summarise(totalSale = sum(revenue)) %>%
-        arrange(desc(totalSale))
+  group_by(weekdays) %>%
+  summarise(totalSale = sum(revenue, na.rm = TRUE)) %>%
+  arrange(desc(totalSale))
 weekdaysSales$totalSale = round(weekdaysSales$totalSale, 2)
 
 ggplot(na.omit(weekdaysSales), aes(x =reorder(weekdays, totalSale), y =  totalSale, fill = weekdays))+
-        geom_bar(stat = "identity", color ="blue") +
-        scale_y_continuous(breaks= seq(0, 650000000, by=50000000), labels = comma) +
-        labs(title = "Sales on weekdays", x = "Week Days", y =  "Items sold", fill = "Week Days") +
-        geom_label(stat = "identity",position = position_dodge(width = 1),hjust = "center", aes(label = totalSale)) 
- 
+  geom_bar(stat = "identity", color ="blue") +
+  scale_y_continuous(breaks= seq(0, 650000000, by=50000000), labels = comma) +
+  labs(title = "Total Sales on Weekdays", x = "Weekdays", y =  "Sales Count", fill = "Weekdays") +
+  geom_label(stat = "identity",position = position_dodge(width = 1),hjust = "center", aes(label = totalSale)) 
 
  
 # Feature engineering
+
 new_df<- function(df, period){
   
   
@@ -515,10 +511,8 @@ new_df<- function(df, period){
   
   # dummy colomuns
   dum_colums <- dummyVars(~., data = final %>% select(
-    item_category_id,
-    item_category_name,
-    shop_name))
-  data <- final %>%
+    item_category_id, item_category_name, shop_name))
+  final <- final %>%
     bind_cols(predict(dum_colums, final) %>% as.data.frame())
   
   return(final)
@@ -529,55 +523,13 @@ salesData1 <- new_df(salesData, 32)
 salesData2 <- new_df(salesData, 33)
 salesData_pred <- new_df(salesData, 34)
 
-
-
-# xgboost
-
-model_xgboost <- function(X_data, Y_data){
-  
-  X_data <- X_data %>% as.matrix()
-  Y_data <- Y_data %>% as.matrix()
-  
-  # parameters
-  set.seed(17)
-  param <- list(objective = "reg:linear",
-                eval_metric = "rmse",
-                eta = 0.07,
-                max_depth = 5,
-                min_child_weight = 10,
-                colsample_bytree = 1,
-                gamma = 0.9,
-                alpha = 1.0,
-                subsample = 0.7
-  )
-  
-  # parallel
-  N_cpu = detectCores()
-  
-  # nrounds with cross-validation
-  xgbcv <- xgb.cv(param = param, data = X_data, label = Y_data,
-                  nrounds = 200,
-                  nfold = 10,
-                  nthread = N_cpu
-  )
-  
-  # modling
-  set.seed(2020)
-  model_xgb <- xgboost(param = param, data = X_data, label = Y_data,
-                       nrounds = which.min(xgbcv$evaluation_log$test_rmse_mean),
-                       nthread = N_cpu, importance = TRUE)
-  
-  return(model_xgb)
-}
-
-
-# preparation
+# Preparing data
 x_salesData1 <- salesData1 %>%
   select(
     starts_with("item_price_"), -month1, starts_with("l_"), starts_with("total_sales_"),
     -total_sales_select, starts_with("total_rev_sales_"), n_item,
     starts_with("d_"), dur_total_sales, zero_sales, starts_with("d_sales_"), r_month, month,
-    starts_with("item_category_id"),-item_category_id,  -l_sales2, -l_sales3, -item_price_shop_sd,
+    starts_with("item_category_id"),-item_category_id, -item_category_id0, -l_sales2, -l_sales3, -item_price_shop_sd,
     -item_price_shop_min, -item_price_shop_mean, -item_price_shop_median, -item_price_mean,
     -item_price_median, -item_price_max, -l_price1, -l_price2, -l_price3,-l_price4, -l_price5
   )
@@ -590,7 +542,7 @@ x_salesData2 <- salesData2 %>%
     starts_with("item_price_"), -month1, starts_with("l_"), starts_with("total_sales_"),
     -total_sales_select, starts_with("total_rev_sales_"), n_item,
     starts_with("d_"), dur_total_sales, zero_sales, starts_with("d_sales_"), r_month, month,
-    starts_with("item_category_id"), -item_category_id,  -l_sales2, -l_sales3, -item_price_shop_sd,
+    starts_with("item_category_id"), -item_category_id, -item_category_id0, -l_sales2, -l_sales3, -item_price_shop_sd,
     -item_price_shop_min, -item_price_shop_mean, -item_price_shop_median, -item_price_mean,
     -item_price_median, -item_price_max, -l_price1, -l_price2, -l_price3,-l_price4, -l_price5
   )
@@ -598,20 +550,44 @@ x_salesData2 <- salesData2 %>%
 y_salesData2 <- salesData2 %>%
   select(total_sales_select)
 
+# Modeling
+
+x_data <- x_salesData1 %>% as.matrix()
+Y_data <- y_salesData1 %>% as.matrix()
+  
+set.seed(2020)
+param<-list(
+    max_depth = 4, 
+    eta = 0.02, 
+    gamma = 0, 
+    colsample_bytree = 0.65, 
+    subsample = 0.6, 
+    min_child_weight = 3
+)
+
+  
+# nrounds with cross-validation
+xgbcv <- xgb.cv( param = param, data = x_data, label = Y_data, nrounds = 1000, 
+                 nfold = 10, showsd = F, stratified = T, print_every_n = 250, 
+                 early_stopping_rounds = 100, maximize = F)
+
+set.seed(2020)
+model_xgb <- xgboost(param = param, data = x_data, label = Y_data,
+                       nrounds = xgbcv$best_iteration, importance = TRUE)
+  
+
 # check the most important features
-xgb1 <- model_xgboost(x_salesData1, y_salesData1)
-mat <- xgb.importance(names(x_salesData1), model = xgb1)
-ggplot(mat[1:25,])+
-  geom_bar(mapping = aes(x = reorder(Feature, Gain), y =Gain), stat = "identity")+
+mat <- xgb.importance(names(x_data), model = model_xgb)
+ggplot(mat[1:40,])+
+  geom_bar(aes(x=reorder(Feature, Gain), y=Gain), stat='identity', fill='blue')+
   xlab(label = "Features")+
   coord_flip() +
   ggtitle("Feature Importance")
 
 
-
 # RMSE 1
 pred_salesData1 <- salesData1 %>%
-  bind_cols(pred = predict(xgb1, newdata = x_salesData1 %>% as.matrix(), type = "response")) %>%
+  bind_cols(pred = predict(model_xgb, newdata = x_salesData1 %>% as.matrix(), type = "response")) %>%
   mutate(error = total_sales_select - pred)
 
 pred_salesData1 %>%
@@ -621,7 +597,7 @@ pred_salesData1 %>%
 
 # RMSE 2
 pred_salesData2 <- salesData2 %>%
-  bind_cols(pred = predict(xgb1, newdata = x_salesData2 %>% as.matrix(), type = "response")) %>%
+  bind_cols(pred = predict(model_xgb, newdata = x_salesData2 %>% as.matrix(), type = "response")) %>%
   mutate(error = total_sales_select - pred)
 
 pred_salesData2 %>%
@@ -629,18 +605,20 @@ pred_salesData2 %>%
     RMSE = sqrt(sum(abs(error^2))/n())
   )
 
+# Final prediction
+
 x_salesData_pred <- salesData_pred %>%
   select(
     starts_with("item_price_"), -month1, starts_with("l_"), starts_with("total_sales_"),
     -total_sales_select, starts_with("total_rev_sales_"), n_item,
     starts_with("d_"), dur_total_sales, zero_sales, starts_with("d_sales_"), r_month, month,
-    starts_with("item_category_id"), -item_category_id,  -l_sales2, -l_sales3, -item_price_shop_sd,
+    starts_with("item_category_id"), -item_category_id, -item_category_id0, -l_sales2, -l_sales3, -item_price_shop_sd,
     -item_price_shop_min, -item_price_shop_mean, -item_price_shop_median, -item_price_mean,
     -item_price_median, -item_price_max, -l_price1, -l_price2, -l_price3,-l_price4, -l_price5
   )
 
 finalPredictions <- salesData_pred %>%
-  bind_cols(item_cnt_month = predict(xgb1, newdata = x_salesData_pred %>% as.matrix(), type = "response")) %>%
+  bind_cols(item_cnt_month = predict(model_xgb, newdata = x_salesData_pred %>% as.matrix(), type = "response")) %>%
   left_join(testData, by = c("shop_id", "item_id")) %>%
   select(ID, item_cnt_month) %>%
   mutate(item_cnt_month = ifelse(item_cnt_month > 20, 20, ifelse(item_cnt_month < 0, 0, item_cnt_month)))
